@@ -376,8 +376,7 @@ class DeformableTransformerDecoder(nn.Module):
             query_sine_embed = gen_sineembed_for_position(reference_points)
 
             # If you still want to add learned query_pos:
-            if query_pos is not None:
-                query_pos = query_pos.transpose(0, 1)  # [bs, num_queries, dim] → [num_queries, bs, dim]
+            if query_pos is not None:  # [bs, num_queries, dim] → [num_queries, bs, dim]
                 query_sine_embed = query_sine_embed + query_pos
 
             output = layer(
