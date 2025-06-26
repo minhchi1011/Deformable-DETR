@@ -19,6 +19,41 @@ from torch.nn.init import xavier_uniform_, constant_, uniform_, normal_
 from util.misc import inverse_sigmoid
 from models.ops.modules import MSDeformAttn
 
+def gen_sineembed_for_position(pos_tensor):
+    scale = 2 * math.pi
+    if pos_tensor.dim() == 4:
+        bs, num_queries, num_levels, _ = pos_tensor.shape
+        pos_tensor = pos_tensor.reshape(bs, num_queries * num_levels, -1)
+        need_reshape_back = True
+    else:
+        need_reshape_back = False
+
+    dim_t = torch.arange(128, dtype=torch.float32, device=pos_tensor.device)
+    dim_t = 10000 ** (2 * (dim_t // 2) / 128)
+    dim_t = dim_t.unsqueeze(0).unsqueeze(0)  # [1, 1, 128]
+
+    x_embed = pos_tensor[..., 0] * scale
+    y_embed = pos_tensor[..., 1] * scale
+
+    pos_x = x_embed[..., None] / dim_t
+    pos_y = y_embed[..., None] / dim_t
+
+    pos_x = torch.stack((pos_x[..., 0::2].sin(), pos_x[..., 1::2].cos()), dim=-1).flatten(-2)
+    pos_y = torch.stack((pos_y[..., 0::2].sin(), pos_y[..., 1::2].cos()), dim=-1).flatten(-2)
+
+    pos = torch.cat((pos_y, pos_x), dim=-1)
+
+    if need_reshape_back:
+        pos = pos.view(bs, num_queries, num_levels, -1)
+    return pos
+
+
+
+
+
+
+
+
 
 class DeformableTransformer(nn.Module):
     def __init__(self, d_model=256, nhead=8,
@@ -292,21 +327,22 @@ class DeformableTransformerDecoderLayer(nn.Module):
         tgt = self.norm3(tgt)
         return tgt
 
-    def forward(self, tgt, query_pos, reference_points, src, src_spatial_shapes, level_start_index, src_padding_mask=None):
-        # self attention
-        q = k = self.with_pos_embed(tgt, query_pos)
+    def forward(self, tgt, query_sine_embed, reference_points, src, src_spatial_shapes, level_start_index, src_padding_mask=None):
+        # Self-attention với sine embedding
+        q = k = self.with_pos_embed(tgt, query_sine_embed)
         tgt2 = self.self_attn(q.transpose(0, 1), k.transpose(0, 1), tgt.transpose(0, 1))[0].transpose(0, 1)
         tgt = tgt + self.dropout2(tgt2)
         tgt = self.norm2(tgt)
 
-        # cross attention
-        tgt2 = self.cross_attn(self.with_pos_embed(tgt, query_pos),
-                               reference_points,
-                               src, src_spatial_shapes, level_start_index, src_padding_mask)
+        # Cross-attention với sine embedding
+        tgt2 = self.cross_attn(
+            self.with_pos_embed(tgt, query_sine_embed),
+            reference_points, src, src_spatial_shapes, level_start_index, src_padding_mask
+        )
         tgt = tgt + self.dropout1(tgt2)
         tgt = self.norm1(tgt)
 
-        # ffn
+        # FFN
         tgt = self.forward_ffn(tgt)
 
         return tgt
@@ -318,7 +354,6 @@ class DeformableTransformerDecoder(nn.Module):
         self.layers = _get_clones(decoder_layer, num_layers)
         self.num_layers = num_layers
         self.return_intermediate = return_intermediate
-        # hack implementation for iterative bounding box refinement and two-stage Deformable DETR
         self.bbox_embed = None
         self.class_embed = None
 
@@ -328,16 +363,30 @@ class DeformableTransformerDecoder(nn.Module):
 
         intermediate = []
         intermediate_reference_points = []
+
         for lid, layer in enumerate(self.layers):
             if reference_points.shape[-1] == 4:
-                reference_points_input = reference_points[:, :, None] \
-                                         * torch.cat([src_valid_ratios, src_valid_ratios], -1)[:, None]
+                reference_points_input = reference_points[:, :, None] * torch.cat(
+                    [src_valid_ratios, src_valid_ratios], -1)[:, None]
             else:
                 assert reference_points.shape[-1] == 2
                 reference_points_input = reference_points[:, :, None] * src_valid_ratios[:, None]
-            output = layer(output, query_pos, reference_points_input, src, src_spatial_shapes, src_level_start_index, src_padding_mask)
 
-            # hack implementation for iterative bounding box refinement
+            # 💡 Add conditional-style positional embedding
+            query_sine_embed = gen_sineembed_for_position(reference_points)
+
+            # If you still want to add learned query_pos:
+            if query_pos is not None:
+                query_pos = query_pos.unsqueeze(1).repeat(1, query_sine_embed.shape[1], 1)
+                query_pos = query_pos.transpose(0, 1)  # [bs, num_queries, dim]
+                query_sine_embed = query_sine_embed + query_pos
+
+            output = layer(
+                output, query_sine_embed, reference_points_input,
+                src, src_spatial_shapes, src_level_start_index, src_padding_mask
+            )
+
+            # box refinement logic
             if self.bbox_embed is not None:
                 tmp = self.bbox_embed[lid](output)
                 if reference_points.shape[-1] == 4:
