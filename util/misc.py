@@ -55,9 +55,12 @@ if version.parse(torchvision.__version__) < version.parse("0.5"):
             int(math.floor(input.size(i + 2) * scale_factors[i])) for i in range(dim)
         ]
 elif float(torchvision.__version__[:3]) < 0.7:
-    from torchvision.ops import _new_empty_tensor
     from torchvision.ops.misc import _output_size
 
+
+
+def _new_empty_tensor(input, shape):
+    return input.new_empty(shape)
 
 class SmoothedValue(object):
     """Track a series of values and provide access to smoothed values over a
