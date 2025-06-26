@@ -377,8 +377,7 @@ class DeformableTransformerDecoder(nn.Module):
 
             # If you still want to add learned query_pos:
             if query_pos is not None:
-                query_pos = query_pos.unsqueeze(1).repeat(1, query_sine_embed.shape[1], 1)
-                query_pos = query_pos.transpose(0, 1)  # [bs, num_queries, dim]
+                query_pos = query_pos.transpose(0, 1)  # [bs, num_queries, dim] → [num_queries, bs, dim]
                 query_sine_embed = query_sine_embed + query_pos
 
             output = layer(
